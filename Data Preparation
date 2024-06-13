@@ -1,0 +1,54 @@
+#Import Libraries
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+import math
+from tensorflow import keras
+from tensorflow.keras import backend as K
+from tensorflow.keras import layers
+from tensorflow.keras.layers import TextVectorization
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from keras.callbacks import ModelCheckpoint, EarlyStopping
+from tensorflow.keras.models import load_model
+import matplotlib.pyplot as plt
+from tensorflow.keras.utils import to_categorical
+from keras.layers import Dense, Dropout, GlobalAveragePooling1D, Flatten
+from transformers import TFBertModel, BertTokenizer,BertConfig
+from tensorflow.keras.layers.experimental.preprocessing import StringLookup
+import re
+import torch
+import sklearn
+
+#Define Variables
+channels=[0,1,2,3,4,5,6,7,8]
+epLen = 13
+cdr3Len = 20
+oneHotLen = 21
+epitopeArray = []
+cdr3Array = []
+cdr3PhyPro = []
+epPhyPro = []
+yTest = []
+yTrain = []
+
+# read data from database
+rawDataEpitopes = pd.read_csv('epitopes.csv', sep='\t', header=None).to_numpy()
+rawDataCDR3s = pd.read_csv('tcr.csv', sep='\t', header=None).to_numpy()
+rawData = pd.read_csv('full_data.csv', sep=',').to_numpy()
+    
+for idx, val in enumerate (rawData):
+    posEp = np.where(rawDataEpitopes[:,1] == val[1])[0]
+    ep = rawDataEpitopes[posEp,0][0]
+    epitopeArray.append (ep)
+    
+    posCDR3 = np.where(rawDataCDR3s[:,1] == val[2])[0]
+    cdr3 = rawDataCDR3s[posCDR3,0][0]
+    cdr3Array.append (cdr3)    
+        
+    yTrain.append (val[3])
+
+epitopeSeqArray = np.array(epitopeArray)
+cdr3SeqArray = np.array(cdr3Array)
+labelArray = np.array(yTrain)
+
+np.savez('VdjdbWithNegativeData', epitopeSeqArray=epitopeSeqArray, cdr3SeqArray = cdr3SeqArray, labelArray = labelArray)
