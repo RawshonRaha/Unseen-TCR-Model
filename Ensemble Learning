@@ -1,0 +1,110 @@
+#Import Libraries
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+import math
+from tensorflow import keras
+from tensorflow.keras import backend as K
+from tensorflow.keras import layers
+from tensorflow.keras.layers import TextVectorization
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from keras.callbacks import ModelCheckpoint, EarlyStopping
+from tensorflow.keras.models import load_model
+import matplotlib.pyplot as plt
+from tensorflow.keras.utils import to_categorical
+from keras.layers import Dense, Dropout, GlobalAveragePooling1D, Flatten
+from transformers import TFBertModel, BertTokenizer,BertConfig
+from tensorflow.keras.layers.experimental.preprocessing import StringLookup
+import re
+import torch
+import sklearn
+from sklearn.preprocessing import normalize
+
+Bert = np.load('BertSimpleBiLSTM.npz',allow_pickle=True)
+BertScore = Bert['score']
+target = Bert['yTest']
+
+PCP = np.load('PCPBiLSTMAtn.npz',allow_pickle=True)
+PCPScore = PCP['score']
+target1 = PCP['yTest']
+
+OH = np.load('OHSimpleBiLSTM.npz',allow_pickle=True)
+OHScore = OH['score']
+target2 = OH['yTest']
+
+BertNegScore = 1-Bert['score']
+PCPNegScore = 1-PCP['score']
+OHNegScore = 1-OH['score']
+
+CombinedInteraction = BertScore*PCPScore*OHScore/4
+CombinedNoInteraction = BertNegScore*PCPNegScore*OHNegScore/4
+
+
+CombinedInteractionArray = np.concatenate((CombinedInteraction,CombinedNoInteraction), axis=1)
+
+normalizedArray = normalize(CombinedInteractionArray, norm='l1', axis=1)
+normalizedInteraction, normalizedNoInteraction = normalizedArray[:,0], normalizedArray[:,1]
+
+thres = 0.5
+BertPred = np.greater(BertScore, thres)[:,0]
+PCPPred = np.greater(PCPScore, thres)[:,0]
+OHPred = np.greater(OHScore, thres)[:,0]
+CombinedPred = np.greater(normalizedInteraction, thres)
+
+correctBert = np.count_nonzero(BertPred == target)
+correctPCP = np.count_nonzero(PCPPred == target)
+correctOH = np.count_nonzero(OHPred == target)
+correctComb = np.count_nonzero(CombinedPred == target)
+
+# ROC Curve
+import sklearn
+from sklearn.metrics import roc_auc_score, roc_curve
+import matplotlib.pyplot as plt
+import numpy as np
+
+#OH
+fprOH, tprOH, _ = sklearn.metrics.roc_curve(target,  OHScore)
+AUCOH = sklearn.metrics.roc_auc_score(target, OHScore)
+predOH = (OHScore>0.5)*1.0
+precisionOH = sklearn.metrics.precision_score(y_true=target, y_pred=predOH, pos_label=1)
+recallOH = sklearn.metrics.recall_score(y_true=target, y_pred=predOH, pos_label=1)
+AccuracyOH = correctOH/np.shape (target)[0]
+
+plt.plot(fprOH, tprOH, label=" AUC="+str(round(AUCOH, 3))+" Precision="+str(round(precisionOH, 3))+' \n'+" Recall="+str(round(recallOH, 3))+" for One Hot Vector")
+
+#Bert
+fprBert, tprBert, _ = sklearn.metrics.roc_curve(target,  BertScore)
+AUCBert = sklearn.metrics.roc_auc_score(target, BertScore)
+predBert = (BertScore>0.5)*1.0
+precisionBert = sklearn.metrics.precision_score(y_true=target, y_pred=predBert, pos_label=1)
+recallBert = sklearn.metrics.recall_score(y_true=target, y_pred=predBert, pos_label=1)
+AccuracyBert = correctBert/np.shape (target)[0]
+
+plt.plot(fprBert, tprBert, label=" AUC="+str(round(AUCBert, 3))+" Precision="+str(round(precisionBert, 3))+' \n'+" Recall="+str(round(recallBert, 3))+" for ProtBERT Embedding Vector")
+
+#PCP
+fprPCP, tprPCP, _ = sklearn.metrics.roc_curve(target,  PCPScore)
+AUCPCP = sklearn.metrics.roc_auc_score(target, PCPScore)
+predPCP = (PCPScore>0.5)*1.0
+precisionPCP = sklearn.metrics.precision_score(y_true=target, y_pred=predPCP, pos_label=1)
+recallPCP = sklearn.metrics.recall_score(y_true=target, y_pred=predPCP, pos_label=1)
+AccuracyPCP = correctPCP/np.shape (target)[0]
+
+plt.plot(fprPCP, tprPCP, label=" AUC="+str(round(AUCPCP, 3))+" Precision="+str(round(precisionPCP, 3))+' \n'+" Recall="+str(round(recallPCP, 3))+" for Physicochemical Property Vector")
+
+#Merged
+fprMerged, tprMerged, _ = sklearn.metrics.roc_curve(target,  normalizedInteraction)
+AUCMerged = sklearn.metrics.roc_auc_score(target, normalizedInteraction)
+predMerged = (normalizedInteraction>0.5)*1.0
+precisionMerged = sklearn.metrics.precision_score(y_true=target, y_pred=predMerged, pos_label=1)
+recallMerged = sklearn.metrics.recall_score(y_true=target, y_pred=predMerged, pos_label=1)
+AccuracyMerged = correctComb/np.shape (target)[0]
+
+plt.plot(fprMerged, tprMerged, label=" AUC="+str(round(AUCMerged, 3))+" Precision="+str(round(precisionMerged, 3))+' \n'+" Recall="+str(round(recallMerged, 3))+" for Ensemble Learning Model")
+plt.title('AUC-ROC Curve using different Deep Learning models for VDJdb', fontsize=12)
+plt.legend(loc='center left', bbox_to_anchor=(0.16, 0.23), fontsize=10)
+plt.xlabel("False Positive Rate", fontsize=12)
+plt.ylabel("True Positive Rate", fontsize=12)
+plt.savefig('AUCdifferentFeatures.png')
+plt.show()
+print(correctBert, correctPCP, correctOH, correctComb)
