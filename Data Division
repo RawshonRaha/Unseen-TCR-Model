@@ -1,0 +1,106 @@
+#Import Libraries
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+import math
+from tensorflow import keras
+from tensorflow.keras import backend as K
+from tensorflow.keras import layers
+from tensorflow.keras.layers import TextVectorization
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from keras.callbacks import ModelCheckpoint, EarlyStopping
+from tensorflow.keras.models import load_model
+import matplotlib.pyplot as plt
+from tensorflow.keras.utils import to_categorical
+from keras.layers import Dense, Dropout, GlobalAveragePooling1D, Flatten
+from transformers import TFBertModel, BertTokenizer,BertConfig
+from tensorflow.keras.layers.experimental.preprocessing import StringLookup
+import re
+import torch
+import sklearn
+
+#Load Database
+VdjdbWithNegativeData = np.load('VdjdbWithNegativeData.npz',allow_pickle=True)
+epitopeSeqArray = VdjdbWithNegativeData['epitopeSeqArray']
+cdr3SeqArray = VdjdbWithNegativeData['cdr3SeqArray']
+labelArray = VdjdbWithNegativeData['labelArray']
+
+CDR3EpitopePairArray = np.transpose([epitopeSeqArray,cdr3SeqArray,labelArray])
+
+# Identify unique Epitope and CDR3
+uniqueEpitope = np.unique(epitopeSeqArray)
+uniqueCDR3 = np.unique(cdr3SeqArray)
+
+np.random.shuffle(uniqueCDR3)
+SamplesPerFold = ((np.shape(CDR3EpitopePairArray)[0])/10)-2
+
+#define variables
+foldedDataEpitopePhyPro = []
+foldedDataCDR3PhyPro = []
+foldedDataTarget = []
+foldedDataEpitopeSeq = []
+foldedDataCDR3Seq = []
+f=0
+fold = 1
+epPhyPro = []
+epSeq = []
+cdr3Seq = []
+cdr3PhyPro = []
+target = []
+
+#Divide data based on CDR3 sequences to satisfy unseen CDR3 setting
+for cdr3 in uniqueCDR3:    
+    for idx, val in enumerate (cdr3SeqArray):
+        if val == cdr3:
+            f = f+1
+            epSeq.append(epitopeSeqArray[idx])
+            cdr3Seq.append(cdr3SeqArray[idx])
+            target.append(labelArray[idx])
+        
+            padEp, padCDR3 = idListPhy(epitopeSeqArray[idx], 13, cdr3SeqArray[idx], 20)
+            epPhyPro.append(padEp)
+            cdr3PhyPro.append(padCDR3)
+            
+    #Stop when reached targeted number of SamplesPerFold 
+    if (f>(SamplesPerFold)):  
+        foldedDataEpitopePhyPro.append(epPhyPro)
+        foldedDataCDR3PhyPro.append(cdr3PhyPro)
+        foldedDataTarget.append(target)
+        foldedDataEpitopeSeq.append(epSeq)
+        foldedDataCDR3Seq.append(cdr3Seq)
+        
+        #reset data for next fold
+        f = 0
+        fold = fold + 1
+        epPhyPro = []
+        epSeq = []
+        cdr3Seq = []
+        cdr3PhyPro = []
+        target = []
+
+foldedDataEpitopePhyPro.append(epPhyPro)
+foldedDataCDR3PhyPro.append(cdr3PhyPro)
+foldedDataTarget.append(target)
+foldedDataEpitopeSeq.append(epSeq)
+foldedDataCDR3Seq.append(cdr3Seq)
+
+#preparing vocabulary for One Hot Vector
+wholeText = ''
+
+for i,val in enumerate(epitopeSeqArray ):    
+    wholeText+=epitopeSeqArray [i] + cdr3SeqArray [i]
+
+vocab = sorted(set(wholeText))
+vocabLength = len(vocab)
+
+ids_from_chars = StringLookup(vocabulary=list(vocab), mask_token=None)
+all_ids = ids_from_chars(tf.strings.unicode_split(wholeText, 'UTF-8'))
+chars_from_ids = StringLookup(vocabulary=list(vocab), invert=True)
+sss = ids_from_chars(tf.strings.unicode_split('ACDEFGHIKLMNPQRSTVWY', 'UTF-8'))
+vocabLength = 20
+vocab_size = vocabLength+1
+
+# preparing sample data for a fold
+channels=[0,1,2,3,4,5,6,7,8]
+xTrainEpitope, xValidEpitope, xTestEpitope, xTrainCDR3, xValidCDR3, xTestCDR3, xTrainEpitopeSeqOH, xValidEpitopeSeqOH, xTestEpitopeSeqOH, xTrainCDR3SeqOH, xValidCDR3SeqOH, xTestCDR3SeqOH, xTrainEpitopeSeqBert, xValidEpitopeSeqBert, xTestEpitopeSeqBert, xTrainCDR3SeqBert, xValidCDR3SeqBert, xTestCDR3SeqBert, yTrain, yValid, yTest1 = getFoldedData(1,2,channels)  
+np.savez('DatasetOHBertPCPVdjdbDATAFold1', xTrainEpitope=xTrainEpitope, xValidEpitope=xValidEpitope, xTestEpitope=xTestEpitope, xTrainCDR3 =xTrainCDR3, xValidCDR3 =xValidCDR3, xTestCDR3 = xTestCDR3, xTrainEpitopeSeqOH = xTrainEpitopeSeqOH, xValidEpitopeSeqOH = xValidEpitopeSeqOH, xTestEpitopeSeqOH=xTestEpitopeSeqOH, xTrainCDR3SeqOH=xTrainCDR3SeqOH, xValidCDR3SeqOH=xValidCDR3SeqOH, xTestCDR3SeqOH=xTestCDR3SeqOH, xTrainEpitopeSeqBert=xTrainEpitopeSeqBert, xValidEpitopeSeqBert=xValidEpitopeSeqBert, xTestEpitopeSeqBert=xTestEpitopeSeqBert, xTrainCDR3SeqBert=xTrainCDR3SeqBert, xValidCDR3SeqBert = xValidCDR3SeqBert, xTestCDR3SeqBert = xTestCDR3SeqBert, yTrain = yTrain, yValid = yValid, yTest1 = yTest1)
