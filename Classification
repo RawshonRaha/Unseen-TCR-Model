@@ -1,0 +1,263 @@
+#Import Libraries
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+import math
+from tensorflow import keras
+from tensorflow.keras import backend as K
+from tensorflow.keras import layers
+from tensorflow.keras.layers import TextVectorization
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from keras.callbacks import ModelCheckpoint, EarlyStopping
+from tensorflow.keras.models import load_model
+import matplotlib.pyplot as plt
+from tensorflow.keras.utils import to_categorical
+from keras.layers import Dense, Dropout, GlobalAveragePooling1D, Flatten
+from transformers import TFBertModel, BertTokenizer,BertConfig
+from tensorflow.keras.layers.experimental.preprocessing import StringLookup
+import re
+import torch
+import sklearn
+
+def plotModelAccLoss(grp, pltName):
+    
+    # summarize history for accuracy
+    fig, (ax1, ax2) = plt.subplots(2, 1)
+    fig.suptitle('Encoder Seq Phy '+ pltName)
+
+    ax1.plot(grp['accuracy'])
+    ax1.plot(grp['val_accuracy'])
+    ax1.set_ylabel('Accuracy')
+    ax1.legend(['train', 'test'], loc='upper left')
+
+    ax2.plot(grp['loss'])
+    ax2.plot(grp['val_loss'])
+    ax2.set_xlabel('epoch')
+    ax2.set_ylabel('Loss')
+    ax2.legend(['train', 'test'], loc='upper left')
+    plt.savefig(pltName)
+    plt.show()
+    
+def calcAccuracy(fold, score1, ytestTruth):
+    thres = 0.5
+    pred1 = tf.greater(score1, thres)    
+    correct1=0                    
+    for idx,val in enumerate(pred1):
+        if(val==ytestTruth[idx] ):
+            correct1=correct1+1;             
+
+    acc1= correct1/(idx+1)    
+    print('fold', fold, idx, correct1, acc1)
+
+def learningRateScheduler(epoch, lr):    
+    if epoch < 10:
+        return lr
+    else:
+        return lr * tf.math.exp(-0.1)
+
+# Load prepared training, validation and testing data
+DatasetVDJDBDATA = np.load('DatasetOHBertPCPVdjdbDATAFold1.npz',allow_pickle=True)
+
+xTrainEpitopeSeqOH = DatasetVDJDBDATA['xTrainEpitopeSeqOH']
+xTrainEpitopeSeqBert = DatasetVDJDBDATA['xTrainEpitopeSeqBert']
+xTrainEpitope = DatasetVDJDBDATA['xTrainEpitope']
+xTrainCDR3SeqOH = DatasetVDJDBDATA['xTrainCDR3SeqOH']
+xTrainCDR3SeqBert = DatasetVDJDBDATA['xTrainCDR3SeqBert']
+xTrainCDR3 = DatasetVDJDBDATA['xTrainCDR3'] 
+yTrain = DatasetVDJDBDATA['yTrain'].astype(np.int32) 
+
+xValidEpitopeSeqOH = DatasetVDJDBDATA['xValidEpitopeSeqOH']
+xValidEpitopeSeqBert = DatasetVDJDBDATA['xValidEpitopeSeqBert']
+xValidEpitope = DatasetVDJDBDATA['xValidEpitope']
+xValidCDR3SeqOH = DatasetVDJDBDATA['xValidCDR3SeqOH']
+xValidCDR3SeqBert = DatasetVDJDBDATA['xValidCDR3SeqBert']
+xValidCDR3 = DatasetVDJDBDATA['xValidCDR3']
+yValid = DatasetVDJDBDATA['yValid'].astype(np.int32)
+
+xTestEpitopeSeqOH = DatasetVDJDBDATA['xTestEpitopeSeqOH']
+xTestEpitopeSeqBert = DatasetVDJDBDATA['xTestEpitopeSeqBert']
+xTestEpitope = DatasetVDJDBDATA['xTestEpitope']
+xTestCDR3SeqOH = DatasetVDJDBDATA['xTestCDR3SeqOH']
+xTestCDR3SeqBert = DatasetVDJDBDATA['xTestCDR3SeqBert']
+xTestCDR3 = DatasetVDJDBDATA['xTestCDR3']
+yTest1 = DatasetVDJDBDATA['yTest1'].astype(np.int32)
+
+#######Model ######################
+class calcMask(tf.keras.layers.Layer):
+    def __init__(self, repLen, epitope_Bert, cdr3_Bert, epLen, cdr3Len, noHeads, **kwargs):
+        super().__init__(**kwargs)
+        self.epitope_Bert = epitope_Bert
+        self.cdr3_Bert = cdr3_Bert
+        self.epLen = epLen
+        self.cdr3Len = cdr3Len
+
+        self.maskEp = tf.keras.layers.Masking(mask_value=0.) (epitope_Bert)
+        self.maskCDR3 = tf.keras.layers.Masking(mask_value=0.) (cdr3_Bert)
+        # self.maskEp = tf.keras.layers.Reshape((1,1,epLen), name = 'ReshapeEpMask')(self.maskEp[:,:,0])
+        # self.maskCDR3 = tf.keras.layers.Reshape((1,1,cdr3Len), name = 'ReshapeCDR3Mask')(self.maskCDR3[:,:,0])
+        self.maskEp = self.maskEp[:,:,0:1]
+        self.maskCDR3 = self.maskCDR3[:,:,0:1]
+
+        self.maskSelfEp = tf.keras.layers.Dot(axes=(2, 2))([self.maskEp, self.maskEp])
+        self.maskSelfCDR3 = tf.keras.layers.Dot(axes=(2, 2))([self.maskCDR3, self.maskCDR3])
+        self.maskEpCDR3 = tf.keras.layers.Dot(axes=(2, 2))([self.maskEp, self.maskCDR3])
+        self.maskCDR3Ep = tf.keras.layers.Dot(axes=(2, 2))([self.maskCDR3, self.maskEp])
+
+    def call(self):
+
+        return [self.maskSelfEp, self.maskSelfCDR3, self.maskEpCDR3, self.maskCDR3Ep]
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "epitope_Bert": self.epitope_Bert,
+                "cdr3_Bert": self.cdr3_Bert,
+            }
+        )
+        return config
+
+def LSTMModel(epLen, cdr3Len, channelLen, oneHotLen):
+
+    epitope_inputsPhy = keras.Input(shape=(epLen,channelLen), name="Epitope_inputsPhy")
+    cdr3_inputsPhy = keras.Input(shape=(cdr3Len,channelLen), name="CDR3_inputsPhy")
+    masks = calcMask(21, epitope_inputsPhy , cdr3_inputsPhy , epLen, cdr3Len, noHeads = 5)
+
+    bilstmEpPCP = keras.layers.LSTM(16, activation='relu', dropout=0.2, recurrent_dropout=0.2, return_sequences = True)
+    bilstmCDR3PCP = keras.layers.LSTM(16, activation='relu', dropout=0.2, recurrent_dropout=0.2, return_sequences = True)
+
+    epitope_PCP = bilstmEpPCP (epitope_inputsPhy , mask = masks.maskEp)
+    cdr3_PCP = bilstmCDR3PCP (cdr3_inputsPhy , mask = masks.maskCDR3)
+
+    merged = keras.layers.concatenate([cdr3_PCP, epitope_PCP], axis=1, name = 'EpitopeCDR3Merged') 
+    out = tf.keras.layers.Flatten(name = 'FlattenOp')(merged)
+    out = Dense(512, activation='relu', name = 'DenseTo512')(out)
+    out = Dropout(0.2, name = 'Dropout40percent2')(out)
+    out = Dense(128, activation='relu', name = 'DenseTo128')(out)
+    interaction = Dense(1, activation='sigmoid', name = 'Interaction/OutputLayer')(out)
+
+    LSTMInteractions = keras.Model(
+        [epitope_inputsOH, epitope_inputsBert, epitope_inputsPhy, cdr3_inputsOH, cdr3_inputsBert , cdr3_inputsPhy], interaction, name="EmbeddingAttention")
+
+
+    LSTMInteractions.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001), loss=tf.keras.losses.BinaryCrossentropy(), metrics=["accuracy"]
+    )
+    return LSTMInteractions
+
+def BiLSTMModel(epLen, cdr3Len, channelLen, oneHotLen):
+
+    epitope_inputsPhy = keras.Input(shape=(epLen,channelLen), name="Epitope_inputsPhy")
+    cdr3_inputsPhy = keras.Input(shape=(cdr3Len,channelLen), name="CDR3_inputsPhy")
+    masks = calcMask(21, epitope_inputsPhy , cdr3_inputsPhy , epLen, cdr3Len, noHeads = 5)
+
+    bilstmEpPCP = keras.layers.Bidirectional(keras.layers.LSTM(16, activation='relu', dropout=0.2, recurrent_dropout=0.2, return_sequences = True))
+    bilstmCDR3PCP = keras.layers.Bidirectional(keras.layers.LSTM(16, activation='relu', dropout=0.2, recurrent_dropout=0.2, return_sequences = True))
+
+    epitope_PCP = bilstmEpPCP (epitope_inputsPhy , mask = masks.maskEp)
+    cdr3_PCP = bilstmCDR3PCP (cdr3_inputsPhy , mask = masks.maskCDR3)
+
+    merged = keras.layers.concatenate([cdr3_PCP, epitope_PCP], axis=1, name = 'EpitopeCDR3Merged') 
+    out = tf.keras.layers.Flatten(name = 'FlattenOp')(merged)
+    out = Dense(512, activation='relu', name = 'DenseTo512')(out)
+    out = Dropout(0.2, name = 'Dropout40percent2')(out)
+    out = Dense(128, activation='relu', name = 'DenseTo128')(out)
+    interaction = Dense(1, activation='sigmoid', name = 'Interaction/OutputLayer')(out)
+
+    BiLSTMInteractions = keras.Model(
+        [epitope_inputsOH, epitope_inputsBert, epitope_inputsPhy, cdr3_inputsOH, cdr3_inputsBert , cdr3_inputsPhy], interaction, name="EmbeddingAttention")
+
+
+    BiLSTMInteractions.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001), loss=tf.keras.losses.BinaryCrossentropy(), metrics=["accuracy"]
+    )
+    return BiLSTMInteractions
+
+def DoubleBiLSTMModel(epLen, cdr3Len, channelLen, oneHotLen):
+
+    epitope_inputsPhy = keras.Input(shape=(epLen,channelLen), name="Epitope_inputsPhy")
+    cdr3_inputsPhy = keras.Input(shape=(cdr3Len,channelLen), name="CDR3_inputsPhy")
+    masks = calcMask(21, epitope_inputsPhy , cdr3_inputsPhy , epLen, cdr3Len, noHeads = 5)
+
+    bilstmEpPCP = keras.layers.Bidirectional(keras.layers.LSTM(16, activation='relu', dropout=0.2, recurrent_dropout=0.2, return_sequences = True))
+    bilstmCDR3PCP = keras.layers.Bidirectional(keras.layers.LSTM(16, activation='relu', dropout=0.2, recurrent_dropout=0.2, return_sequences = True))
+
+    epitope_PCP = bilstmEpPCP (epitope_inputsPhy , mask = masks.maskEp)
+    cdr3_PCP = bilstmCDR3PCP (cdr3_inputsPhy , mask = masks.maskCDR3)
+
+    merged = keras.layers.concatenate([cdr3_PCP, epitope_PCP], axis=1, name = 'EpitopeCDR3Merged')
+    out = keras.layers.Bidirectional(keras.layers.LSTM(16, activation='relu', dropout=0.01, return_sequences = True), name = 'DenseMergedSequence')(merged)  
+    out = tf.keras.layers.Flatten(name = 'FlattenOp')(out)
+    out = Dense(512, activation='relu', name = 'DenseTo512')(out)
+    out = Dropout(0.2, name = 'Dropout40percent2')(out)
+    out = Dense(128, activation='relu', name = 'DenseTo128')(out)
+    interaction = Dense(1, activation='sigmoid', name = 'Interaction/OutputLayer')(out)
+
+    DoubleBiLSTMInteractions = keras.Model(
+        [epitope_inputsOH, epitope_inputsBert, epitope_inputsPhy, cdr3_inputsOH, cdr3_inputsBert , cdr3_inputsPhy], interaction, name="EmbeddingAttention")
+
+
+    DoubleBiLSTMInteractions.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001), loss=tf.keras.losses.BinaryCrossentropy(), metrics=["accuracy"]
+    )
+    return DoubleBiLSTMInteractions
+
+def AttentionBiLSTMModel(epLen, cdr3Len, channelLen, oneHotLen):
+
+    epitope_inputsPhy = keras.Input(shape=(epLen,channelLen), name="Epitope_inputsPhy")
+    cdr3_inputsPhy = keras.Input(shape=(cdr3Len,channelLen), name="CDR3_inputsPhy")
+    masks = calcMask(21, epitope_inputsPhy , cdr3_inputsPhy , epLen, cdr3Len, noHeads = 5)
+
+    bilstmEpPCP = keras.layers.Bidirectional(keras.layers.LSTM(16, activation='relu', dropout=0.2, recurrent_dropout=0.2, return_sequences = True))
+    bilstmCDR3PCP = keras.layers.Bidirectional(keras.layers.LSTM(16, activation='relu', dropout=0.2, recurrent_dropout=0.2, return_sequences = True))
+
+    epitope_PCP = bilstmEpPCP (epitope_inputsPhy , mask = masks.maskEp)
+    cdr3_PCP = bilstmCDR3PCP (cdr3_inputsPhy , mask = masks.maskCDR3)
+    
+    cdr3_self_attention = tf.keras.layers.MultiHeadAttention(8,16, dropout=0.01, name = 'CDR3SelfAttention')(cdr3_PCP, value = cdr3_PCP, attention_mask = masks.maskSelfCDR3)
+    ep_self_attention = tf.keras.layers.MultiHeadAttention(8,16, dropout=0.01, name = 'EpSelfAttention')(epitope_PCP, value = epitope_PCP, attention_mask = masks.maskSelfEp)
+    
+    cdr3_ep_attention = tf.keras.layers.MultiHeadAttention(8,16, dropout=0.01, name = 'CDR3EpAttention')(cdr3_self_attention, value = ep_self_attention, attention_mask = masks.maskCDR3Ep)
+    ep_cdr3_attention = tf.keras.layers.MultiHeadAttention(8,16, dropout=0.01, name = 'EpCDR3Attention')(ep_self_attention, value = cdr3_self_attention, attention_mask = masks.maskEpCDR3)
+
+    merged = keras.layers.concatenate([cdr3_ep_attention, ep_cdr3_attention], axis=1, name = 'EpitopeCDR3Merged')
+    out = keras.layers.Bidirectional(keras.layers.LSTM(16, activation='relu', dropout=0.01, return_sequences = True), name = 'DenseMergedSequence')(merged)  
+    out = tf.keras.layers.Flatten(name = 'FlattenOp')(out)
+    out = Dense(512, activation='relu', name = 'DenseTo512')(out)
+    out = Dropout(0.2, name = 'Dropout40percent2')(out)
+    out = Dense(128, activation='relu', name = 'DenseTo128')(out)
+    interaction = Dense(1, activation='sigmoid', name = 'Interaction/OutputLayer')(out)
+
+    AttentionBiLSTMInteractions = keras.Model(
+        [epitope_inputsOH, epitope_inputsBert, epitope_inputsPhy, cdr3_inputsOH, cdr3_inputsBert , cdr3_inputsPhy], interaction, name="EmbeddingAttention")
+
+
+    AttentionBiLSTMInteractions.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.0001), loss=tf.keras.losses.BinaryCrossentropy(), metrics=["accuracy"]
+    )
+    return AttentionBiLSTMInteractions
+
+# Training
+#Selecting physicochemical properties for training. Here 4 best performin physicochemical properties are selected
+channels=[1,2,5,8]
+epLen = 13
+cdr3Len = 20
+oneHotLen = 21
+
+# training parameters
+epochs = 80  
+checkpoint = ModelCheckpoint("PhyAtnBiLSTM.h5", monitor='val_accuracy', verbose=0, save_best_only=True,
+                                 save_weights_only=False, mode='auto')
+early = EarlyStopping(monitor='val_accuracy', min_delta=0, patience=30, restore_best_weights=True, verbose=2, mode='auto')
+learningRate = tf.keras.callbacks.LearningRateScheduler(learningRateScheduler)
+
+Model = BiLSTMModel(epLen,cdr3Len,4, oneHotLen)
+Model.summary()
+
+hist1 = Model.fit([xTrainEpitope[:,:,channels], xTrainCDR3[:,:,channels]], yTrain, batch_size=128, epochs=epochs, verbose=2, validation_data=([xValidEpitope[:,:,channels], xValidCDR3[:,:,channels]], yValid), callbacks=[checkpoint, early, learningRate])
+score1 = Model.predict([xTestEpitope[:,:,channels], xTestCDR3[:,:,channels]], verbose=0)
+
+plotModelAccLoss(hist1.history, 'PhyAtnBiLSTM1.png')
+calcAccuracy(1, score1, yTest1)
+
+np.savez('PhyAtnBiLSTM1', yTest=yTest1, score=score1, hist=hist1.history)
